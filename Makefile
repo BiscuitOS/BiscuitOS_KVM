@@ -17,13 +17,13 @@ endif
 obj-m			:= $(MODULE_NAME).o
 
 ## Source Code
-$(MODULE_NAME)-m	:= main.o
+$(MODULE_NAME)-m	:= kvm_main.o
 # $(MODULE_NAME)-m	+= $(patsubst $(PWD)/%.c,%.o, $(wildcard $(PWD)/src/*.c)) 
 
 ## CFlags
 ccflags-y		+= -DCONFIG_BISCUITOS_MODULE
 ## Header
-# ccflags-y		:= -I$(PWD)/include
+ccflags-y		:= -I$(PWD)/include
 
 else
 
