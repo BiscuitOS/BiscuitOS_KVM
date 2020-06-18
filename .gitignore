@@ -1,0 +1,20 @@
+# Ignore image file
+
+# Ignore indicate file
+*.o
+*.o.*
+.*.o.cmd
+.*.swp
+.*
+*.ko
+*.mod.c
+*.order
+*.symvers
+
+# Execte file
+
+# Ignore dirent
+
+!.gitignore
+# output
+
