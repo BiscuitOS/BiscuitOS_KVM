@@ -49,7 +49,7 @@ static struct kvm_stats_debugfs_item_bs {
 };
 
 static struct dentry *debugfs_dir_bs;
-hpa_t bad_page_address_bs;
+hpa_t_bs bad_page_address_bs;
 
 /*
  * List of msr numbers which we expose to userspace through KVM_GET_MSRS
@@ -130,10 +130,20 @@ out:
 
 static __exit void kvm_exit_bs(void)
 {
+	struct kvm_stats_debugfs_item_bs *p;
+
+	for (p = debugfs_entries_bs; p->name; p++)
+		debugfs_remove(p->dentry);
+	debugfs_remove(debugfs_dir_bs);
 }
 
 module_init(kvm_init_bs);
 module_exit(kvm_exit_bs);
+
+int kvm_init_arch_bs(struct kvm_arch_ops_bs *ops, struct module *module)
+{
+	return 0;
+}
 
 MODULE_AUTHOR("BiscuitOS Copy");
 MODULE_LICENSE("GPL");
