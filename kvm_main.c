@@ -23,6 +23,7 @@
 #include <linux/debugfs.h>
 #include <linux/smp.h>
 #include <linux/reboot.h>
+#include <linux/miscdevice.h>
 
 #include <linux-bs/kvm.h>
 #include <asm-bs/msr.h>
@@ -96,7 +97,7 @@ static __init void kvm_init_debug_bs(void)
 {
 	struct kvm_stats_debugfs_item_bs *p;
 
-	debugfs_dir_bs = debugfs_create_dir("kvm_bs", 0);
+	debugfs_dir_bs = debugfs_create_dir("kvm_BiscuitOS", 0);
 	for (p = debugfs_entries_bs; p->name; ++p)
 		p->dentry = debugfs_create_u32(p->name, 0444, debugfs_dir_bs,
 						p->data);
@@ -289,6 +290,12 @@ static struct file_operations kvm_chardev_ops_bs = {
 	.mmap		= kvm_dev_mmap_bs,
 };
 
+static struct miscdevice kvm_dev_bs = {
+	MISC_DYNAMIC_MINOR,
+	"kvm_BiscuitOS",
+	&kvm_chardev_ops_bs,
+};
+
 static __init int kvm_init_bs(void)
 {
 	static struct page *bad_page;
@@ -355,7 +362,20 @@ int kvm_init_arch_bs(struct kvm_arch_ops_bs *ops, struct module *module)
 	register_reboot_notifier(&kvm_reboot_notifier_bs);
 
 	kvm_chardev_ops_bs.owner = module;
-	return 0;
+
+	r = misc_register(&kvm_dev_bs);
+	if (r) {
+		printk(KERN_ERR "kvm: misc device register failed.\n");
+		goto out_free;
+	}
+
+	return r;
+
+out_free:
+	unregister_reboot_notifier(&kvm_reboot_notifier_bs);
+	on_each_cpu(kvm_arch_ops_bs->hardware_disable, 0, 1);
+	kvm_arch_ops_bs->hardware_unsetup();
+	return r;
 }
 
 EXPORT_SYMBOL_GPL(kvm_init_arch_bs);

@@ -15,11 +15,11 @@ else
 MODULE_NAME		:= BiscuitOS_KVM
 endif
 obj-m			:= $(MODULE_NAME).o
-obj-m			+= kvm-intel-bs.o
+obj-m			+= $(MODULE_NAME)-intel.o
 
 ## Source Code
 $(MODULE_NAME)-m	:= kvm_main.o mmu.o
-kvm-intel-bs-m		:= vmx.o
+$(MODULE_NAME)-intel-m	:= vmx.o
 
 # $(MODULE_NAME)-m	+= $(patsubst $(PWD)/%.c,%.o, $(wildcard $(PWD)/src/*.c)) 
 

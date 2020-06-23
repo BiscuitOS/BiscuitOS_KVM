@@ -38,6 +38,7 @@ static __init int cpu_has_kvm_support_bs(void)
 	return test_bit(5, &ecx); /* CPUID.1:ECX.VMX[bit 5] -> VT */
 }
 
+/* 2-6.2 */
 static __init int vmx_disabled_by_bios_bs(void)
 {
 	u64 msr;
@@ -46,6 +47,7 @@ static __init int vmx_disabled_by_bios_bs(void)
 	return (msr & 5) == 1; /* locked but not enabled */
 }
 
+/* 3-A.1 */
 static __init void setup_vmcs_descriptor_bs(void)
 {
 	u32 vmx_msr_low, vmx_msr_high;
