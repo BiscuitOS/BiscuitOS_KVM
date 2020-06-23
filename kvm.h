@@ -1,16 +1,8 @@
 #ifndef _BISCUITOS_KVM_H
 #define _BISCUITOS_KVM_H
 
+#include <linux-bs/kvm.h>
 #include "kvm_svm.h"
-
-/*
- * Architectural interrupt line count, and the size of the bitmap needed
- * to hold them.
- */
-#define KVM_NR_INTERRUPTS_BS			256
-#define KVM_IRQ_BITMAP_SIZE_BYTES_BS		((KVM_NR_INTERRUPTS_BS + 7) / 8)
-#define KVM_IRQ_BITMAP_SIZE_BS(type)		(KVM_IRQ_BITMAP_SIZE_BYTES_BS /\
-							sizeof(type))
 
 #define MSR_IA32_TIME_STAMP_COUNTER_BS		0x010
 
@@ -24,6 +16,9 @@
 #define FX_IMAGE_ALIGN_BS			16
 #define FX_BUF_SIZE_BS				(2 * FX_IMAGE_SIZE_BS + \
 							FX_IMAGE_ALIGN_BS)
+
+#define ASM_VMX_VMXOFF_BS			".byte 0x0f, 0x01, 0xc4"
+#define ASM_VMX_VMXON_RAW_BS			".byte 0xf3, 0x0f, 0xc7, 0x30"
 
 /*
  * Address types:
@@ -43,6 +38,17 @@ typedef unsigned long gfn_t_bs;
 typedef unsigned long hva_t_bs;
 typedef u64           hpa_t_bs;
 typedef unsigned long hfn_t_bs;
+
+#define NR_PTE_CHAIN_ENTRIES_BS			5
+
+struct kvm_pte_chain_bs {
+	u64 *parent_ptes[NR_PTE_CHAIN_ENTRIES_BS];
+	struct hlist_node link;
+};
+
+#define INVALID_PAGE_BS				(~(hpa_t_bs)0)
+#define UNMAPPED_GVA_BS				(~(gpa_t_bs)0)
+#define VALID_PAGE_BS(x)			((x) != INVALID_PAGE_BS)
 
 struct kvm_vcpu_bs;
 
@@ -66,12 +72,6 @@ struct vmcs_bs {
 	u32 revision_id;
 	u32 abort;
 	char data[0];
-};
-
-struct kvm_msr_entry_bs {
-	__u32 index;
-	__u32 reserved;
-	__u64 data;
 };
 
 #define vmx_msr_entry_bs	kvm_msr_entry_bs
@@ -111,7 +111,7 @@ struct kvm_mmu_page_bs {
 				    * in the shadow page.
 				    */
 	int global;		/* Set if all ptes in this page are global */
-	int multmapped;		/* More than one parent_pte? */
+	int multimapped;		/* More than one parent_pte? */
 	int root_count;		/* Currently serving as active root */
 	union {
 		u64 *parent_pte;		/* !multimapped */
@@ -270,87 +270,6 @@ struct descriptor_table_bs {
 	unsigned long base;
 } __attribute__((packed));
 
-struct kvm_breakpoint_bs {
-	__u32 enabled;
-	__u32 padding;
-	__u64 address;
-};
-
-/* for KVM_DEBUG_GUEST */
-struct kvm_debug_guest_bs {
-	/* int */
-	__u32 vcpu;
-	__u32 enabled;
-	struct kvm_breakpoint_bs breakpoints[4];
-	__u32 singlestep;
-};
-
-struct kvm_segment_bs {
-	__u64 base;
-	__u32 limit;
-	__u16 selector;
-	__u8  type;
-	__u8  present, dpl, db, s, l, g, avl;
-	__u8  unusable;
-	__u8  padding;
-};
-
-/* for KVM_RUN */
-struct kvm_run_bs {
-	/* in */
-	__u32 vcpu;
-	__u32 emulated;		/* skip current instruction */
-	__u32 mmio_completed;	/* mmio request completed */
-	__u8  request_interrupt_window;
-	__u8  padding1[3];
-
-	/* out */
-	__u32 exit_type;
-	__u32 exit_reason;
-	__u32 instruction_length;
-	__u8  ready_for_interrupt_injection;
-	__u8  if_flag;
-	__u16 padding2;
-	__u64 acpi_base;
-
-	union {
-		/* KVM_EXIT_UNKNOWN */
-		struct {
-			__u32 hardware_exit_reason;
-		} hw;
-		/* KVM_EXIT_EXCEPTION */
-		struct {
-			__u32 exception;
-			__u32 error_code;
-		} ex;
-		/* KVM_EXIT_IO */
-		struct {
-#define KVM_EXIT_IO_IN_BS	0
-#define KVM_EXIT_IO_OUT		1
-			__u8 direction;
-			__u8 size; /* bytes */
-			__u8 string;
-			__u8 string_down;
-			__u8 rep;
-			__u8 pad;
-			__u16 port;
-			__u64 count;
-			union {
-				__u64 address;
-				__u32 value;
-			};
-		} io;
-		struct {
-		} debug;
-		/* KVM_EXIT_MMIO */
-		struct {
-			__u64 phys_addr;
-			__u8  data[8];
-			__u32 len;
-			__u8  is_write;
-		} mmio;
-	};
-};
 
 struct kvm_arch_ops_bs {
 	int (*cpu_has_kvm_support)(void);		/* __init */
@@ -362,6 +281,9 @@ struct kvm_arch_ops_bs {
 
 	int (*vcpu_create)(struct kvm_vcpu_bs *vcpu);
 	void (*vcpu_free)(struct kvm_vcpu_bs *vcpu);
+
+	struct kvm_vcpu_bs *(*vcpu_load)(struct kvm_vcpu_bs *vcpu);
+	void (*vcpu_put)(struct kvm_vcpu_bs *vcpu);
 
 	int (*set_guest_debug)(struct kvm_vcpu_bs *vcpu,
 				struct kvm_debug_guest_bs *dbg);
@@ -407,5 +329,21 @@ struct kvm_arch_ops_bs {
 	int (*vcpu_setup)(struct kvm_vcpu_bs *vcpu);
 	void (*skip_emulated_instruction)(struct kvm_vcpu_bs *vcpu);
 };
+
+static inline struct kvm_mmu_page_bs *page_header_bs(hpa_t_bs shadow_page)
+{
+	struct page *page = pfn_to_page(shadow_page >> PAGE_SHIFT);
+
+	return (struct kvm_mmu_page_bs *)page->private;
+}
+
+int kvm_init_arch_bs(struct kvm_arch_ops_bs *ops, struct module *module);
+int kvm_mmu_setup_bs(struct kvm_vcpu_bs *vcpu);
+int kvm_mmu_create_bs(struct kvm_vcpu_bs *vcpu);
+void kvm_mmu_destroy_bs(struct kvm_vcpu_bs *vcpu);
+
+extern struct kvm_arch_ops_bs *kvm_arch_ops_bs;
+
+#define BS_DUP() printk("Expand..%s-%s-%d\n", __FILE__, __func__, __LINE__)
 
 #endif

@@ -21,10 +21,14 @@
 #include <linux/mm.h>
 #include <linux/slab.h>
 #include <linux/debugfs.h>
+#include <linux/smp.h>
+#include <linux/reboot.h>
 
+#include <linux-bs/kvm.h>
 #include <asm-bs/msr.h>
 #include "kvm.h"
 
+struct kvm_arch_ops_bs *kvm_arch_ops_bs;
 struct kvm_stat_bs kvm_stat_bs;
 EXPORT_SYMBOL_GPL(kvm_stat_bs);
 
@@ -68,6 +72,26 @@ static u32 msrs_to_save_bs[] = {
 
 static unsigned num_msrs_to_save_bs;
 
+static int kvm_reboot_bs(struct notifier_block *notifier, unsigned long val,
+				void *v)
+{
+	if (val == SYS_RESTART) {
+		/*
+		 * Some (well, at least mine) BIOSes hang on reboot if
+		 * in vmx root mode.
+		 */
+		printk(KERN_INFO "kvm: existing hardware virtualization\n");
+		on_each_cpu(kvm_arch_ops_bs->hardware_disable, 0, 1);
+	}
+
+	return NOTIFY_OK;
+}
+
+static struct notifier_block kvm_reboot_notifier_bs = {
+	.notifier_call = kvm_reboot_bs,
+	.priority = 0,
+};
+
 static __init void kvm_init_debug_bs(void)
 {
 	struct kvm_stats_debugfs_item_bs *p;
@@ -102,6 +126,168 @@ static __init void kvm_init_msr_list_bs(void)
 	}
 	num_msrs_to_save_bs = j;
 }
+
+static void vcpu_put_bs(struct kvm_vcpu_bs *vcpu)
+{
+	kvm_arch_ops_bs->vcpu_put(vcpu);
+	mutex_unlock(&vcpu->mutex);
+}
+
+static int vcpu_slot_bs(struct kvm_vcpu_bs *vcpu)
+{
+	return vcpu - vcpu->kvm->vcpus;
+}
+
+/*
+ * Switches to specified vcpu, until a matching vcpu_put()
+ */
+static struct kvm_vcpu_bs *vcpu_load_bs(struct kvm_bs *kvm, int vcpu_slot)
+{
+	struct kvm_vcpu_bs *vcpu = &kvm->vcpus[vcpu_slot];
+
+	mutex_lock(&vcpu->mutex);
+	if (unlikely(!vcpu->vmcs)) {
+		mutex_unlock(&vcpu->mutex);
+		return 0;
+	}
+	return kvm_arch_ops_bs->vcpu_load(vcpu);
+}
+
+static void kvm_free_vcpu_bs(struct kvm_vcpu_bs *vcpu)
+{
+	vcpu_load_bs(vcpu->kvm, vcpu_slot_bs(vcpu));
+	kvm_mmu_destroy_bs(vcpu);
+	vcpu_put_bs(vcpu);
+	kvm_arch_ops_bs->vcpu_free(vcpu);
+}
+
+static void kvm_free_vcpus_bs(struct kvm_bs *kvm)
+{
+	unsigned int i;
+
+	for (i = 0; i < KVM_MAX_VCPUS_BS; ++i)
+		kvm_free_vcpu_bs(&kvm->vcpus[i]);
+}
+
+static int kvm_dev_open_bs(struct inode *inode, struct file *filp)
+{
+	struct kvm_bs *kvm = kzalloc(sizeof(struct kvm_bs), GFP_KERNEL);
+	int i;
+
+	if (!kvm)
+		return -ENOMEM;
+
+	spin_lock_init(&kvm->lock);
+	INIT_LIST_HEAD(&kvm->active_mmu_pages);
+	for (i = 0; i < KVM_MAX_VCPUS_BS; ++i) {
+		struct kvm_vcpu_bs *vcpu = &kvm->vcpus[i];
+
+		mutex_init(&vcpu->mutex);
+		vcpu->kvm = kvm;
+		vcpu->mmu.root_hpa = INVALID_PAGE_BS;
+		INIT_LIST_HEAD(&vcpu->free_pages);
+	}
+	filp->private_data = kvm;
+	return 0;
+}
+
+static int kvm_dev_release_bs(struct inode *inode, struct file *filp)
+{
+	BS_DUP();
+	return 0;
+}
+
+static inline int valid_vcpu_bs(int n)
+{
+	return likely(n >= 0 && n < KVM_MAX_VCPUS_BS);
+}
+
+/*
+ * Creates some virtual cpus. Good luck creating more than one.
+ */
+static int kvm_dev_ioctl_create_vcpu_bs(struct kvm_bs *kvm, int n)
+{
+	int r;
+	struct kvm_vcpu_bs *vcpu;
+
+	r = -EINVAL;
+	if (!valid_vcpu_bs(n))
+		goto out;
+
+	vcpu = &kvm->vcpus[n];
+
+	mutex_lock(&vcpu->mutex);
+
+	if (vcpu->vmcs) {
+		mutex_unlock(&vcpu->mutex);
+		return -EEXIST;
+	}
+
+	vcpu->host_fx_image = (char *)ALIGN((hva_t_bs)vcpu->fx_buf,
+					FX_IMAGE_ALIGN_BS);
+	vcpu->guest_fx_image = vcpu->host_fx_image + FX_IMAGE_SIZE_BS;
+
+	vcpu->cpu = -1;	/* First load will set up TR */
+	r = kvm_arch_ops_bs->vcpu_create(vcpu);
+	if (r < 0)
+		goto out_free_vcpus;
+
+	r = kvm_mmu_create_bs(vcpu);
+	if (r < 0)
+		goto out_free_vcpus;
+
+	kvm_arch_ops_bs->vcpu_load(vcpu);
+	r = kvm_mmu_setup_bs(vcpu);
+	if (r >= 0)
+		r = kvm_arch_ops_bs->vcpu_setup(vcpu);
+	vcpu_put_bs(vcpu);
+
+	if (r < 0)
+		goto out_free_vcpus;
+
+	return 0;
+
+out_free_vcpus:
+	kvm_free_vcpu_bs(vcpu);
+	mutex_unlock(&vcpu->mutex);
+out:
+	return r;
+}
+
+static long kvm_dev_ioctl_bs(struct file *filp,
+				unsigned int ioctl, unsigned long arg)
+{
+	struct kvm_bs *kvm = filp->private_data;
+	int r = -EINVAL;
+
+	switch (ioctl) {
+	case KVM_GET_API_VERSION_BS:
+		r = KVM_API_VERSION_BS;
+		break;
+	case KVM_CREATE_VCPU_BS: {
+		r = kvm_dev_ioctl_create_vcpu_bs(kvm, arg);
+		if (r)
+			goto out;
+		break;
+	}
+	}
+out:
+	return r;
+}
+
+static int kvm_dev_mmap_bs(struct file *file, struct vm_area_struct *vma)
+{
+	BS_DUP();
+	return 0;
+}
+
+static struct file_operations kvm_chardev_ops_bs = {
+	.open		= kvm_dev_open_bs,
+	.release	= kvm_dev_release_bs,
+	.unlocked_ioctl	= kvm_dev_ioctl_bs,
+	.compat_ioctl	= kvm_dev_ioctl_bs,
+	.mmap		= kvm_dev_mmap_bs,
+};
 
 static __init int kvm_init_bs(void)
 {
@@ -142,8 +328,37 @@ module_exit(kvm_exit_bs);
 
 int kvm_init_arch_bs(struct kvm_arch_ops_bs *ops, struct module *module)
 {
+	int r;
+
+	if (kvm_arch_ops_bs) {
+		printk(KERN_ERR "kvm: already loaded the other module\n");
+		return -EEXIST;
+	}
+
+	if (!ops->cpu_has_kvm_support()) {
+		printk(KERN_ERR "kvm: no hardware support\n");
+		return -EOPNOTSUPP;
+	}
+
+	if (ops->disabled_by_bios()) {
+		printk(KERN_ERR "kvm: disabled by bios\n");
+		return -EOPNOTSUPP;
+	}
+
+	kvm_arch_ops_bs = ops;
+
+	r = kvm_arch_ops_bs->hardware_setup();
+	if (r < 0)
+		return r;
+
+	on_each_cpu(kvm_arch_ops_bs->hardware_enable, 0, 1);
+	register_reboot_notifier(&kvm_reboot_notifier_bs);
+
+	kvm_chardev_ops_bs.owner = module;
 	return 0;
 }
+
+EXPORT_SYMBOL_GPL(kvm_init_arch_bs);
 
 MODULE_AUTHOR("BiscuitOS Copy");
 MODULE_LICENSE("GPL");
