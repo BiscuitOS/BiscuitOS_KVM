@@ -14,6 +14,25 @@
 /* AMD Defined MSRs */
 #define MSR_K6_STAR_BS			0xC0000081
 
+/*
+ * Access to machine-specific registers (available on 586 and better only)
+ * Note: the rd* operations modify the parameters directly (without using
+ * pointer indirection), this allows gcc to optimize better
+ */
+
+#define rdmsr_bs(msr,val1,val2)					\
+	__asm__ __volatile__("rdmsr"				\
+			: "=a" (val1), "=d" (val2)		\
+			: "c" (msr))
+
+#define rdmsrl_bs(msr,val)					\
+do {								\
+	unsigned long l__,h__;					\
+	rdmsr_bs(msr, l__, h__);				\
+	val = l__;						\
+	val |= ((u64)h__ << 32);				\
+} while (0)
+
 /* rdmsr with exception handling */
 #define rdmsr_safe_bs(msr,a,b)					\
 ({								\

@@ -21,6 +21,7 @@
 #include <linux/mm.h>
 #include <linux/slab.h>
 
+#include <linux-bs/list.h>
 #include "kvm.h"
 #include "vmx.h"
 
@@ -386,8 +387,193 @@ void kvm_mmu_destroy_bs(struct kvm_vcpu_bs *vcpu)
 
 static int alloc_mmu_pages_bs(struct kvm_vcpu_bs *vcpu)
 {
+	struct page *page;
+	int i;
+
+	ASSERT_BS(vcpu);
+
+	for (i = 0; i < KVM_NUM_MMU_PAGES_BS; i++) {
+		struct kvm_mmu_page_bs *page_header = &vcpu->page_header_buf[i];
+
+		INIT_LIST_HEAD(&page_header->link);
+		if ((page = alloc_page(GFP_KERNEL)) == NULL)
+			goto error_1;
+		page->private = (unsigned long)page_header;
+		page_header->page_hpa = 
+				(hpa_t_bs)page_to_pfn(page) << PAGE_SHIFT;
+		memset(__va(page_header->page_hpa), 0, PAGE_SIZE);
+		list_add(&page_header->link, &vcpu->free_pages);
+		++vcpu->kvm->n_free_mmu_pages;
+	}
+
+	/*
+	 * When emulating 32-bit mode, cr3 is only 32 bits even on X86_64.
+	 * Therefore we need to allocate shadow page tables in the first
+	 * 4GB of memory, which happens to fit the DMA32 zone.
+	 */
+	page = alloc_page(GFP_KERNEL | __GFP_DMA32);
+	if (!page)
+		goto error_1;
+	vcpu->mmu.pae_root = page_address(page);
+	for (i = 0; i < 4; ++i)
+		vcpu->mmu.pae_root[i] = INVALID_PAGE_BS;
+
+	return 0;
+
+error_1:
+	free_mmu_pages_bs(vcpu);
+	return -ENOMEM;
+}
+
+static void nonpaging_new_cr3_bs(struct kvm_vcpu_bs *vcpu)
+{
+}
+
+static int nonpaging_page_fault_bs(struct kvm_vcpu_bs *vcpu, gva_t_bs gva,
+					u32 error_code)
+{
 	BS_DUP();
 	return 0;
+}
+
+static 
+gpa_t_bs nonpaging_gva_to_gpa_bs(struct kvm_vcpu_bs *vcpu, gva_t_bs vaddr)
+{
+	return vaddr;
+}
+
+static void nonpaging_free_bs(struct kvm_vcpu_bs *vcpu)
+{
+	BS_DUP();
+}
+
+static unsigned kvm_page_table_hashfn_bs(gfn_t_bs gfn)
+{
+	return gfn;
+}
+
+static struct kvm_mmu_page_bs *kvm_mmu_alloc_page_bs(struct kvm_vcpu_bs *vcpu,
+							u64 *parent_pte)
+{
+	struct kvm_mmu_page_bs *page;
+
+	if (list_empty(&vcpu->free_pages))
+		return NULL;
+
+	page = list_entry(vcpu->free_pages.next, struct kvm_mmu_page_bs, link);
+	list_del(&page->link);
+	list_add(&page->link, &vcpu->kvm->active_mmu_pages);
+	ASSERT_BS(is_empty_shadow_page_bs(page->page_hpa));
+	page->slot_bitmap = 0;
+	page->global = 1;
+	page->multimapped = 0;
+	page->parent_pte = parent_pte;
+	--vcpu->kvm->n_free_mmu_pages;
+	return page;
+}
+
+static struct kvm_mmu_page_bs *kvm_mmu_get_page_bs(struct kvm_vcpu_bs *vcpu,
+			gfn_t_bs gfn, gva_t_bs gaddr, unsigned level,
+			int metaphysical, u64 *parent_pte)
+{
+	union kvm_mmu_page_role_bs role;
+	unsigned index;
+	unsigned quadrant;
+	struct hlist_head *bucket;
+	struct kvm_mmu_page_bs *page;
+	struct hlist_node *node;
+
+	role.word = 0;
+	role.glevels = vcpu->mmu.root_level;
+	role.level = level;
+	role.metaphysical = metaphysical;
+	if (vcpu->mmu.root_level <= PT32_ROOT_LEVEL_BS) {
+		quadrant = gaddr >> (PAGE_SHIFT + (PT64_PT_BITS_BS * level));
+		quadrant &= (1 << ((PT32_PT_BITS_BS - 
+					PT64_PT_BITS_BS) * level)) - 1;
+		role.quadrant = quadrant;
+	}
+	pgprintk_bs("%s: looking gfn %lx role %x\n", __FUNCTION__,
+				gfn, role.word);
+	index = kvm_page_table_hashfn_bs(gfn) & KVM_NUM_MMU_PAGES_BS;
+	bucket = &vcpu->kvm->mmu_page_hash[index];
+	hlist_for_each_entry_bs(page, node, bucket, hash_link) {
+		if (page->gfn == gfn && page->role.word == role.word) {
+			BS_DUP();
+			return page;
+		}
+	}
+	page = kvm_mmu_alloc_page_bs(vcpu, parent_pte);
+	if (!page)
+		return page;
+	pgprintk_bs("%s: adding gfn %lx role %x\n", __func__, gfn, role.word);
+	page->gfn = gfn;
+	page->role = role;
+	hlist_add_head(&page->hash_link, bucket);
+	if (!metaphysical)
+		BS_DUP();
+	return page;
+}
+
+static void mmu_alloc_roots_bs(struct kvm_vcpu_bs *vcpu)
+{
+	int i;
+	gfn_t_bs root_gfn;
+	struct kvm_mmu_page_bs *page;
+
+	root_gfn = vcpu->cr3 >> PAGE_SHIFT;
+
+	for (i = 0; i < 4; ++i) {
+		hpa_t_bs root = vcpu->mmu.pae_root[i];
+
+		ASSERT_BS(!VALID_PAGE_BS(root));
+		if (vcpu->mmu.root_level == PT32E_ROOT_LEVEL_BS)
+			root_gfn = vcpu->pdptrs[i] >> PAGE_SHIFT;
+		else if (vcpu->mmu.root_level == 0)
+			root_gfn = 0;
+		page = kvm_mmu_get_page_bs(vcpu, root_gfn, i << 30,
+				PT32_ROOT_LEVEL_BS, !is_paging_bs(vcpu),
+				NULL);
+		root = page->page_hpa;
+		++page->root_count;
+		vcpu->mmu.pae_root[i] = root | PT_PRESENT_MASK_BS;
+	}
+	vcpu->mmu.root_hpa = __pa(vcpu->mmu.pae_root);
+}
+
+static int nonpaging_init_context_bs(struct kvm_vcpu_bs *vcpu)
+{
+	struct kvm_mmu_bs *context = &vcpu->mmu;
+
+	context->new_cr3 = nonpaging_new_cr3_bs;
+	context->page_fault = nonpaging_page_fault_bs;
+	context->gva_to_gpa = nonpaging_gva_to_gpa_bs;
+	context->free = nonpaging_free_bs;
+	context->root_level = 0;
+	context->shadow_root_level = PT32E_ROOT_LEVEL_BS;
+	mmu_alloc_roots_bs(vcpu);
+	ASSERT_BS(VALID_PAGE_BS(context->root_hpa));
+	kvm_arch_ops_bs->set_cr3(vcpu, context->root_hpa);
+	return 0;
+}
+
+static int init_kvm_mmu_bs(struct kvm_vcpu_bs *vcpu)
+{
+	ASSERT_BS(vcpu);
+	ASSERT_BS(!VALID_PAGE_BS(vcpu->mmu.root_hpa));
+
+	if (!is_paging_bs(vcpu)) {
+		return nonpaging_init_context_bs(vcpu);
+	} else if (is_long_mode_bs(vcpu)) {
+		BS_DUP();
+		return 0;
+	} else if (is_pae_bs(vcpu)) {
+		BS_DUP();
+		return 0;
+	} else {
+		BS_DUP();
+		return 0;
+	}
 }
 
 int kvm_mmu_create_bs(struct kvm_vcpu_bs *vcpu)
@@ -401,6 +587,9 @@ int kvm_mmu_create_bs(struct kvm_vcpu_bs *vcpu)
 
 int kvm_mmu_setup_bs(struct kvm_vcpu_bs *vcpu)
 {
-	BS_DUP();
-	return 0;
+	ASSERT_BS(vcpu);
+	ASSERT_BS(!VALID_PAGE_BS(vcpu->mmu.root_hpa));
+	ASSERT_BS(!list_empty(&vcpu->free_pages));
+
+	return init_kvm_mmu_bs(vcpu);
 }

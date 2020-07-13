@@ -192,7 +192,9 @@ struct kvm_debug_guest_bs {
 						struct kvm_debug_guest_bs)
 #define KVM_SET_MEMORY_REGION_BS	_IOW(KVMIO_BS, 10, 		\
 						struct kvm_memory_region_bs)
-#define KVM_CREATE_VCPU_BS		_IOW(KVMIO_BS, 11, int /* vcpu_slot */)
+/* In order compatile linux 5.0 */
+//#define KVM_CREATE_VCPU_BS		_IOW(KVMIO_BS, 11, int /* vcpu_slot */)
+#define KVM_CREATE_VCPU_BS		_IO(KVMIO_BS, 0x41/* vcpu_slot */)
 #define KVM_GET_DIRTY_LOG_BS		_IOW(KVMIO_BS, 12, 		\
 						struct kvm_dirty_log_bs)
 #define KVM_GET_MSRS_BS			_IOWR(KVMIO_BS, 13, struct kvm_msrs_bs)

@@ -28,6 +28,7 @@
 #include <linux-bs/kvm.h>
 #include <asm-bs/msr.h>
 #include "kvm.h"
+#include "segment_descriptor.h"
 
 struct kvm_arch_ops_bs *kvm_arch_ops_bs;
 struct kvm_stat_bs kvm_stat_bs;
@@ -130,7 +131,7 @@ static __init void kvm_init_msr_list_bs(void)
 
 static void vcpu_put_bs(struct kvm_vcpu_bs *vcpu)
 {
-	kvm_arch_ops_bs->vcpu_put(vcpu);
+	BS_DUP();
 	mutex_unlock(&vcpu->mutex);
 }
 
@@ -138,6 +139,33 @@ static int vcpu_slot_bs(struct kvm_vcpu_bs *vcpu)
 {
 	return vcpu - vcpu->kvm->vcpus;
 }
+
+unsigned long segment_base_bs(u16 selector)
+{
+	struct descriptor_table_bs gdt;
+	struct segment_descriptor_bs *d;
+	unsigned long table_base;
+	typedef unsigned long ul;
+	unsigned long v;
+
+	if (selector == 0)
+		return 0;
+
+	asm ("sgdt %0" : "=m" (gdt));
+	table_base = gdt.base;
+
+	if (selector & 4) {		/* from ldt */
+		u16 ldt_selector;
+
+		asm ("sldt %0" : "=g" (ldt_selector));
+		table_base = segment_base_bs(ldt_selector);
+	}
+	d = (struct segment_descriptor_bs *)(table_base + (selector & ~7));
+	v = d->base_low | ((ul)d->base_mid << 16) | ((ul)d->base_high << 24);
+	
+	return v;
+}
+EXPORT_SYMBOL_GPL(segment_base_bs);
 
 /*
  * Switches to specified vcpu, until a matching vcpu_put()
@@ -169,6 +197,21 @@ static void kvm_free_vcpus_bs(struct kvm_bs *kvm)
 	for (i = 0; i < KVM_MAX_VCPUS_BS; ++i)
 		kvm_free_vcpu_bs(&kvm->vcpus[i]);
 }
+
+struct kvm_memory_slot_bs *gfn_to_memslot_bs(struct kvm_bs *kvm, gfn_t_bs gfn)
+{
+	int i;
+
+	for (i = 0; i < kvm->nmemslots; ++i) {
+		struct kvm_memory_slot_bs *memslot = &kvm->memslots[i];
+
+		if (gfn >= memslot->base_gfn
+			&& gfn < memslot->base_gfn + memslot->npages)
+			return memslot;
+	}
+	return 0;
+}
+EXPORT_SYMBOL_GPL(gfn_to_memslot_bs);
 
 static int kvm_dev_open_bs(struct inode *inode, struct file *filp)
 {

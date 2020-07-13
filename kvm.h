@@ -4,6 +4,20 @@
 #include <linux-bs/kvm.h>
 #include "kvm_svm.h"
 
+#define CR0_PE_MASK_BS				(1ULL << 0)
+#define CR0_TS_MASK_BS				(1ULL << 3)
+#define CR0_NE_MASK_BS				(1ULL << 5)
+#define CR0_WP_MASK_BS				(1ULL << 16)
+#define CR0_NW_MASK_BS				(1ULL << 29)
+#define CR0_CD_MASK_BS				(1ULL << 30)
+#define CR0_PG_MASK_BS				(1ULL << 31)
+
+#define CR4_VME_MASK_BS				(1ULL << 0)
+#define CR4_PSE_MASK_BS				(1ULL << 4)
+#define CR4_PAE_MASK_BS				(1ULL << 5)
+#define CR4_PGE_MASK_BS				(1ULL << 7)
+#define CR4_VMXE_MASK_BS			(1ULL << 13)
+
 #define MSR_IA32_TIME_STAMP_COUNTER_BS		0x010
 
 #define KVM_MAX_VCPUS_BS			1
@@ -17,8 +31,20 @@
 #define FX_BUF_SIZE_BS				(2 * FX_IMAGE_SIZE_BS + \
 							FX_IMAGE_ALIGN_BS)
 
+#define ASM_VMX_VMCLEAR_RAX_BS			".byte 0x66, 0x0f, 0xc7, 0x30"
+#define ASM_VMX_VMPTRLD_RAX_BS			".byte 0x0f, 0xc7, 0x30"
+#define ASM_VMX_VMREAD_RDX_RAX_BS		".byte 0x0f, 0x78, 0xd0"
+#define ASM_VMX_VMWRITE_RAX_RDX_BS		".byte 0x0f, 0x79, 0xd0"
 #define ASM_VMX_VMXOFF_BS			".byte 0x0f, 0x01, 0xc4"
 #define ASM_VMX_VMXON_RAW_BS			".byte 0xf3, 0x0f, 0xc7, 0x30"
+
+#define TSS_IOPB_BASE_OFFSET_BS			0x66
+#define TSS_BASE_SIZE_BS			0x68
+#define TSS_IOPB_SIZE_BS			(65536 / 8)
+#define TSS_REDIRECTION_SIZE_BS			(256 / 8)
+#define RMODE_TSS_SIZE_BS			(TSS_BASE_SIZE_BS + \
+						TSS_REDIRECTION_SIZE_BS + \
+						TSS_IOPB_SIZE_BS + 1)
 
 /*
  * Address types:
@@ -258,7 +284,7 @@ struct kvm_bs {
 	 */
 	struct list_head active_mmu_pages;
 	int n_free_mmu_pages;
-	struct hlist_head mmu_page_head[KVM_NUM_MMU_PAGES_BS];
+	struct hlist_head mmu_page_hash[KVM_NUM_MMU_PAGES_BS];
 	struct kvm_vcpu_bs vcpus[KVM_MAX_VCPUS_BS];
 	int memory_config_version;
 	int busy;
@@ -336,6 +362,46 @@ static inline struct kvm_mmu_page_bs *page_header_bs(hpa_t_bs shadow_page)
 
 	return (struct kvm_mmu_page_bs *)page->private;
 }
+
+unsigned long segment_base_bs(u16 selector);
+
+static inline int is_paging_bs(struct kvm_vcpu_bs *vcpu)
+{
+	return vcpu->cr0 & CR0_PG_MASK_BS;
+}
+
+static inline int is_long_mode_bs(struct kvm_vcpu_bs *vcpu)
+{
+	return 0;
+}
+
+static inline int is_pae_bs(struct kvm_vcpu_bs *vcpu)
+{
+	return vcpu->cr4 & CR4_PAE_MASK_BS;
+}
+
+static inline unsigned long read_tr_base_bs(void)
+{
+	u16 tr;
+	asm ("str %0" : "=g" (tr));
+	return segment_base_bs(tr);
+}
+
+static inline void get_gdt_bs(struct descriptor_table_bs *table)
+{
+	asm ("sgdt %0" : "=m" (*table));
+}
+
+struct kvm_memory_slot_bs *gfn_to_memslot_bs(struct kvm_bs *kvm, gfn_t_bs gfn);
+
+static inline struct page *_gfn_to_page_bs(struct kvm_bs *kvm, gfn_t_bs gfn)
+{
+	struct kvm_memory_slot_bs *slot = gfn_to_memslot_bs(kvm, gfn);
+	return (slot) ? slot->phys_mem[gfn - slot->base_gfn] : NULL;
+}
+
+#define kvm_printf_bs(kvm, fmt ...) printk(KERN_DEBUG fmt)
+
 
 int kvm_init_arch_bs(struct kvm_arch_ops_bs *ops, struct module *module);
 int kvm_mmu_setup_bs(struct kvm_vcpu_bs *vcpu);
